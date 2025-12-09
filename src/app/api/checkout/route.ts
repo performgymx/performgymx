@@ -1,36 +1,67 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
 
+// ============================================
+// CONFIGURAÇÃO DA STRIPE
+// ============================================
 // Inicializar Stripe com a chave secreta
+// PRODUÇÃO: Configure STRIPE_SECRET_KEY=sk_live_... no .env.local
+// TESTE: Configure STRIPE_SECRET_KEY=sk_test_... no .env.local
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: '2024-11-20.acacia',
 });
 
-// Mapeamento de planos para valores (em centavos)
+// ============================================
+// MAPEAMENTO DE PLANOS E VALORES
+// ============================================
+// Valores em centavos (BRL)
 const PLANOS = {
-  basico: 2990,    // R$ 29,90
-  premium: 4990,   // R$ 49,90
-  empresarial: 9990 // R$ 99,90
+  basico: {
+    valor: 2990,    // R$ 29,90
+    nome: 'Plano Básico',
+    descricao: 'Acesso básico à plataforma'
+  },
+  premium: {
+    valor: 4990,   // R$ 49,90
+    nome: 'Plano Premium',
+    descricao: 'Acesso completo com recursos avançados'
+  },
+  empresarial: {
+    valor: 9990,   // R$ 99,90
+    nome: 'Plano Empresarial',
+    descricao: 'Solução completa para empresas'
+  }
 };
 
+// ============================================
+// ENDPOINT POST /api/checkout
+// ============================================
 export async function POST(request: NextRequest) {
+  console.log('🚀 [CHECKOUT] Iniciando processamento de checkout...');
+  
   try {
-    // Parse do body
+    // ============================================
+    // 1. RECEBER E VALIDAR DADOS
+    // ============================================
     const body = await request.json();
-    const { email, plano, nome } = body;
+    console.log('📥 [CHECKOUT] Dados recebidos:', {
+      nome: body.nome,
+      email: body.email,
+      plano: body.plano,
+      valor: body.valor,
+      userId: body.userId
+    });
 
-    // Validações
-    if (!email || !plano || !nome) {
-      return NextResponse.json(
-        { error: 'Campos obrigatórios: email, plano, nome' },
-        { status: 400 }
-      );
-    }
+    const { nome, email, plano, valor, userId } = body;
 
-    // Validar se o plano existe
-    if (!PLANOS[plano as keyof typeof PLANOS]) {
+    // Validar campos obrigatórios
+    if (!nome || !email || !plano) {
+      console.error('❌ [CHECKOUT] Campos obrigatórios faltando');
       return NextResponse.json(
-        { error: 'Plano inválido. Escolha: basico, premium ou empresarial' },
+        { 
+          status: 'error',
+          error: 'Campos obrigatórios: nome, email, plano' 
+        },
         { status: 400 }
       );
     }
@@ -38,27 +69,65 @@ export async function POST(request: NextRequest) {
     // Validar email
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
+      console.error('❌ [CHECKOUT] Email inválido:', email);
       return NextResponse.json(
-        { error: 'Email inválido' },
+        { 
+          status: 'error',
+          error: 'Email inválido' 
+        },
         { status: 400 }
       );
     }
 
-    // Obter valor do plano
-    const valor = PLANOS[plano as keyof typeof PLANOS];
+    // Validar se o plano existe
+    if (!PLANOS[plano as keyof typeof PLANOS]) {
+      console.error('❌ [CHECKOUT] Plano inválido:', plano);
+      return NextResponse.json(
+        { 
+          status: 'error',
+          error: 'Plano inválido. Escolha: basico, premium ou empresarial' 
+        },
+        { status: 400 }
+      );
+    }
 
-    // Base URL para redirecionamentos
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
-
-    console.log('🚀 Criando sessão Stripe:', {
-      email,
-      plano,
-      valor,
-      nome,
-      baseUrl
+    // ============================================
+    // 2. PREPARAR DADOS DO CHECKOUT
+    // ============================================
+    const planoInfo = PLANOS[plano as keyof typeof PLANOS];
+    
+    // Usar valor do plano (já em centavos) ou converter se vier do frontend
+    const valorEmCentavos = valor ? Math.round(valor * 100) : planoInfo.valor;
+    
+    console.log('💰 [CHECKOUT] Valor calculado:', {
+      plano: planoInfo.nome,
+      valorOriginal: valor,
+      valorEmCentavos,
+      valorFormatado: `R$ ${(valorEmCentavos / 100).toFixed(2)}`
     });
 
-    // Criar sessão de checkout na Stripe
+    // ============================================
+    // 3. CONFIGURAR URLs DE REDIRECIONAMENTO
+    // ============================================
+    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 
+                    process.env.BASE_URL || 
+                    process.env.NEXT_PUBLIC_API_URL || 
+                    'http://localhost:3000';
+
+    const successUrl = `${baseUrl}/sucesso?session_id={CHECKOUT_SESSION_ID}`;
+    const cancelUrl = `${baseUrl}/cancelado`;
+
+    console.log('🔗 [CHECKOUT] URLs configuradas:', {
+      baseUrl,
+      successUrl,
+      cancelUrl
+    });
+
+    // ============================================
+    // 4. CRIAR SESSÃO DE CHECKOUT NA STRIPE
+    // ============================================
+    console.log('🎫 [CHECKOUT] Criando sessão Stripe...');
+    
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
@@ -66,42 +135,65 @@ export async function POST(request: NextRequest) {
           price_data: {
             currency: 'brl',
             product_data: {
-              name: `Plano ${plano.charAt(0).toUpperCase() + plano.slice(1)}`,
-              description: `Assinatura mensal - ${nome}`,
+              name: planoInfo.nome,
+              description: planoInfo.descricao,
             },
-            unit_amount: valor,
+            unit_amount: valorEmCentavos,
           },
           quantity: 1,
         },
       ],
       mode: 'payment',
       customer_email: email,
-      success_url: `${baseUrl}/sucesso?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${baseUrl}/cancelado`,
+      success_url: successUrl,
+      cancel_url: cancelUrl,
       metadata: {
         nome,
+        email,
         plano,
+        userId: userId || 'guest',
+        valorOriginal: valor?.toString() || (valorEmCentavos / 100).toString(),
       },
     });
 
-    console.log('✅ Sessão criada com sucesso:', {
+    console.log('✅ [CHECKOUT] Sessão criada com sucesso:', {
       sessionId: session.id,
-      url: session.url
+      paymentUrl: session.url,
+      amount: valorEmCentavos,
+      currency: 'BRL'
     });
 
-    // Retornar URL da sessão
-    return NextResponse.json({
-      url: session.url,
-      sessionId: session.id
-    });
+    // ============================================
+    // 5. RETORNAR RESPOSTA COM payment_url
+    // ============================================
+    const response = {
+      status: 'ok',
+      payment_url: session.url,
+      sessionId: session.id,
+      amount: valorEmCentavos,
+      currency: 'BRL'
+    };
+
+    console.log('📤 [CHECKOUT] Retornando resposta:', response);
+
+    return NextResponse.json(response);
 
   } catch (error: any) {
-    console.error('❌ Erro ao criar sessão Stripe:', error);
-    
+    // ============================================
+    // TRATAMENTO DE ERROS
+    // ============================================
+    console.error('❌ [CHECKOUT] Erro ao processar checkout:', {
+      message: error.message,
+      type: error.type,
+      code: error.code,
+      stack: error.stack
+    });
+
     return NextResponse.json(
       { 
-        error: 'Erro ao processar pagamento',
-        details: error.message 
+        status: 'error',
+        error: 'Erro ao processar pagamento. Tente novamente.',
+        details: process.env.NODE_ENV === 'development' ? error.message : undefined
       },
       { status: 500 }
     );
